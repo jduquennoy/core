@@ -1,17 +1,18 @@
 """Representation of an EnOcean dongle."""
+from asyncio import sleep
 import glob
-import logging
 from os.path import basename, normpath
 
 from enocean.communicators import SerialCommunicator
+from enocean.protocol.constants import PACKET
 from enocean.protocol.packet import RadioPacket
 import serial
 
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from .const import SIGNAL_RECEIVE_MESSAGE, SIGNAL_SEND_MESSAGE
-
-_LOGGER = logging.getLogger(__name__)
+from .const import LOGGER, SIGNAL_RECEIVE_MESSAGE, SIGNAL_SEND_MESSAGE
+from .utils import enocean_id_to_string
 
 
 class EnOceanDongle:
@@ -21,11 +22,11 @@ class EnOceanDongle:
     creating devices if needed, and dispatching messages to platforms.
     """
 
-    def __init__(self, hass, serial_path):
+    def __init__(self, hass: HomeAssistant, serial_path):
         """Initialize the EnOcean dongle."""
 
         self._communicator = SerialCommunicator(
-            port=serial_path, callback=self.callback
+            port=serial_path, callback=self.enocean_packet_received_callback
         )
         self.serial_path = serial_path
         self.identifier = basename(normpath(serial_path))
@@ -35,6 +36,13 @@ class EnOceanDongle:
     async def async_setup(self):
         """Finish the setup of the bridge and supported platforms."""
         self._communicator.start()
+
+        # Workaround here: we have to get the base id of the dongle.
+        # This is handled by the enocean lib as an asynchronous process,
+        # triggered by the first read access to base_id,
+        # that will always return None.
+        self._communicator.base_id
+
         self.dispatcher_disconnect_handle = async_dispatcher_connect(
             self.hass, SIGNAL_SEND_MESSAGE, self._send_message_callback
         )
@@ -49,15 +57,34 @@ class EnOceanDongle:
         """Send a command through the EnOcean dongle."""
         self._communicator.send(command)
 
-    def callback(self, packet):
-        """Handle EnOcean device's callback.
+    def enocean_packet_received_callback(self, packet):
+        """Handle incoming EnOcean packets.
 
-        This is the callback function called by python-enocan whenever there
+        This is the callback function called by python-enocean whenever there
         is an incoming packet.
         """
 
+        if packet.packet_type == PACKET.RESPONSE:
+            # The packet is a response packet from the bridge for the base_id request.
+            # We need to re-inject it to the receive queue of the enocean lib,
+            # base_id will be available after the receive queue has processed the packet.
+            self._communicator.receive.put(packet)
+
+            async def check_dongle_base_id():
+                await sleep(0.1)
+                dongle_id = self._communicator.base_id
+                # Once we have an ID, we can activate teach_in
+                # without triggering an exception
+                if dongle_id is not None:
+                    LOGGER.info("Dongle ID is %s", enocean_id_to_string(dongle_id))
+                    self._communicator.teach_in = True
+
+            self.hass.add_job(check_dongle_base_id)
+
+            return
+
         if isinstance(packet, RadioPacket):
-            _LOGGER.debug("Received radio packet: %s", packet)
+            LOGGER.debug("Received radio packet: %s", packet)
             self.hass.helpers.dispatcher.dispatcher_send(SIGNAL_RECEIVE_MESSAGE, packet)
 
 
@@ -83,5 +110,5 @@ def validate_path(path: str):
         SerialCommunicator(port=path)
         return True
     except serial.SerialException as exception:
-        _LOGGER.warning("Dongle path %s is invalid: %s", path, str(exception))
+        LOGGER.warning("Dongle path %s is invalid: %s", path, str(exception))
         return False
