@@ -1,18 +1,20 @@
 """Representation of an EnOcean dongle."""
+import asyncio
 from asyncio import sleep
 import glob
 from os.path import basename, normpath
 
 from enocean.communicators import SerialCommunicator
 from enocean.protocol.constants import PACKET
-from enocean.protocol.packet import RadioPacket
+from enocean.protocol.packet import RadioPacket, UTETeachIn
 import serial
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 
-from .const import LOGGER, SIGNAL_RECEIVE_MESSAGE, SIGNAL_SEND_MESSAGE
-from .utils import enocean_id_to_string
+from .const import DOMAIN, LOGGER, SIGNAL_RECEIVE_MESSAGE, SIGNAL_SEND_MESSAGE
+from .utilities import enocean_id_to_string
 
 
 class EnOceanDongle:
@@ -41,6 +43,7 @@ class EnOceanDongle:
         # This is handled by the enocean lib as an asynchronous process,
         # triggered by the first read access to base_id,
         # that will always return None.
+        self._base_id_response_expected = True
         self._communicator.base_id
 
         self.dispatcher_disconnect_handle = async_dispatcher_connect(
@@ -64,7 +67,7 @@ class EnOceanDongle:
         is an incoming packet.
         """
 
-        if packet.packet_type == PACKET.RESPONSE:
+        if packet.packet_type == PACKET.RESPONSE and self._base_id_response_expected:
             # The packet is a response packet from the bridge for the base_id request.
             # We need to re-inject it to the receive queue of the enocean lib,
             # base_id will be available after the receive queue has processed the packet.
@@ -78,6 +81,7 @@ class EnOceanDongle:
                 if dongle_id is not None:
                     LOGGER.info("Dongle ID is %s", enocean_id_to_string(dongle_id))
                     self._communicator.teach_in = True
+                    self._base_id_response_expected = False
 
             self.hass.add_job(check_dongle_base_id)
 
@@ -85,7 +89,38 @@ class EnOceanDongle:
 
         if isinstance(packet, RadioPacket):
             LOGGER.debug("Received radio packet: %s", packet)
-            self.hass.helpers.dispatcher.dispatcher_send(SIGNAL_RECEIVE_MESSAGE, packet)
+            if not self.device_exists_for_packet(packet):
+                self.create_device_for_packet_if_possible(packet)
+            else:
+                self.hass.helpers.dispatcher.dispatcher_send(
+                    SIGNAL_RECEIVE_MESSAGE, packet
+                )
+
+    def device_exists_for_packet(self, packet: RadioPacket):
+        """Return True if the device sending the packet is already known in the registry, False otherwise."""
+        sender_id = enocean_id_to_string(packet.sender)
+        registry = asyncio.run(device_registry.async_get_registry(self.hass))
+        existing_device = registry.async_get_device(
+            identifiers={(DOMAIN, sender_id)}, connections={(DOMAIN, self.identifier)},
+        )
+        return existing_device is not None
+
+    def create_device_for_packet_if_possible(self, packet):
+        """Try to create a device for the given packet if possible.
+
+        This method may fail if the packet does not contain enough information
+        to identify the device (no identifiable EEP for example).
+        """
+        if isinstance(packet, UTETeachIn):
+            LOGGER.debug(
+                "TeachIn: Creating entities packet for unknown device: %s. RORG = %02X",
+                packet,
+                packet.rorg_of_eep,
+            )
+        elif isinstance(packet, RadioPacket) and packet.learn and packet.contains_eep:
+            LOGGER.debug("TODO: deal with learn packet that include EEP.")
+        else:
+            LOGGER.debug("Cannot create device for packet: %s.", packet)
 
 
 def detect():
