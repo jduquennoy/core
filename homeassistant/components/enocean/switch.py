@@ -1,12 +1,17 @@
 """Support for EnOcean switches."""
 import logging
+from typing import List
 
+from utilities import DiscoveredEnOceanDeviceInfo, EnOceanEEP, string_to_enocean_id
 import voluptuous as vol
 
 from homeassistant.components.switch import PLATFORM_SCHEMA
 from homeassistant.const import CONF_ID, CONF_NAME
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.entity import ToggleEntity
+from homeassistant.helpers.entity_registry import async_entries_for_config_entry
 
 from .device import EnOceanEntity
 
@@ -30,15 +35,68 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     dev_id = config.get(CONF_ID)
     dev_name = config.get(CONF_NAME)
 
-    add_entities([EnOceanSwitch(dev_id, dev_name, channel)])
+    add_entities([EnOceanSwitch(dev_id=dev_id, dev_name=dev_name, channel=channel)])
+
+
+async def async_setup_entry(hass: HomeAssistant, config_entry, async_add_entities):
+    """Set up binary sensors for the ENOcean component."""
+
+    entities_to_add = []
+
+    # Load entities from registry
+    entities_registry = await entity_registry.async_get_registry(hass)
+    entities_from_config = async_entries_for_config_entry(
+        entities_registry, config_entry.entry_id
+    )
+
+    for entry in entities_from_config:
+        entities_to_add.append(
+            EnOceanSwitch(
+                string_to_enocean_id(entry.unique_id), entry.name, entry.device_class,
+            )
+        )
+
+    def entity_already_exists(input_id: str):
+        for entity in entities_to_add:
+            if entity.unique_id == input_id:
+                return True
+        return False
+
+    async_add_entities(entities_to_add, True)
+
+
+def entities_for_discovered_device(
+    hass, discovery_info: DiscoveredEnOceanDeviceInfo
+) -> List[EnOceanEntity]:
+    """Return a list of entities for a discovered device."""
+
+    entities = []
+    eep = discovery_info.eep
+
+    # D2-01-* Electronic switches and dimmers
+    if eep.rorg == 0xD2 and eep.func == 0x01:
+        entities.append(
+            EnOceanSwitch(dev_id=discovery_info.device_id, eep=eep, channel=1)
+        )
+        if eep.type in [0x10, 0x11]:
+            entities.append(
+                EnOceanSwitch(dev_id=discovery_info.device_id, eep=eep, channel=2),
+            )
 
 
 class EnOceanSwitch(EnOceanEntity, ToggleEntity):
     """Representation of an EnOcean switch device."""
 
-    def __init__(self, dev_id, dev_name, channel):
+    def __init__(
+        self,
+        dev_id: str,
+        eep: EnOceanEEP = None,
+        dev_name: str = None,
+        channel: int = 1,
+    ):
         """Initialize the EnOcean switch device."""
-        super().__init__(dev_id, dev_name)
+        dev_name = dev_name or f"EnOcean switch {dev_id} - 1"
+        super().__init__(dev_id, eep, dev_name)
         self._light = None
         self._on_state = False
         self._on_state2 = False

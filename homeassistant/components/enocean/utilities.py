@@ -14,9 +14,33 @@ class InvalidEnOceanId(HomeAssistantError):
         super().__init__(f"Invalid enocean id: {invalid_value}")
 
 
+class InvalidEnOceanEEP(HomeAssistantError):
+    """When an EnOcean device EEP does not match the expected format."""
+
+    def __init__(self, invalid_value) -> None:
+        """Init the error."""
+        super().__init__(f"Invalid enocean EEP: {invalid_value}")
+
+
 def enocean_id_to_string(identifier: List[int]) -> str:
     """Return a decodable string representation of an ENOcean identifier."""
     return ":".join([f"{val:02X}" for val in identifier])
+
+
+def string_to_enocean_id(identifier: str) -> List[int]:
+    """Return an EnOcean identifier as a list of ints from a string.
+
+    Raises InvalidEnOceanId if the input is invalid.
+    """
+    try:
+        id_elements = [int(element, 16) for element in identifier.split(":")]
+    except ValueError:
+        raise InvalidEnOceanId(identifier)
+
+    if len(id_elements) != 4 or not all(isinstance(x, int) for x in id_elements):
+        raise InvalidEnOceanId(id_elements)
+
+    return id_elements
 
 
 class EnOceanEEP:
@@ -27,17 +51,20 @@ class EnOceanEEP:
     """
 
     def __init__(self, input_eep):
-        """Create an EEP either from a string or an array of 3 integer values."""
+        """Create an EEP either from a string or an array of 3 integer values.
+
+        Raises InvalidEnOceanEEP if the input is invalid.
+        """
         if isinstance(input_eep, str):
             try:
                 eep_elements = [int(element, 16) for element in input_eep.split(":")]
             except ValueError:
-                raise InvalidEnOceanId(input_eep)
+                raise InvalidEnOceanEEP(input_eep)
         elif isinstance(input_eep, list):
             eep_elements = input_eep
 
         if len(eep_elements) != 3 or not all(isinstance(x, int) for x in eep_elements):
-            raise InvalidEnOceanId(eep_elements)
+            raise InvalidEnOceanEEP(eep_elements)
 
         self.rorg = eep_elements[0]
         self.func = eep_elements[1]

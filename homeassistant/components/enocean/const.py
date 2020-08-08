@@ -12,4 +12,4 @@ SIGNAL_SEND_MESSAGE = "enocean.send_message"
 
 LOGGER = logging.getLogger(__package__)
 
-PLATFORMS = ["light", "binary_sensor", "sensor", "switch"]
+PLATFORMS = ["light"]  # list of the platforms that can be configured using the registry
